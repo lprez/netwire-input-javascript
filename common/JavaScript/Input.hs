@@ -88,7 +88,7 @@ mkInputControl element = do eventsVar <- newIORef []
                    addEventListener element name callback
 
               ptrLockPerformer element ptrLockVar name =
-                do callback <- asyncCallback1 $ \_ -> do
+                do callback <- syncCallback1 ContinueAsync $ \_ -> do
                                 lock <- atomicModifyIORef' ptrLockVar
                                                            (\x -> (False, x))
                                 when lock $ lockCursorRaw element
