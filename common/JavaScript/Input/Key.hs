@@ -1,12 +1,9 @@
-module FRP.Netwire.Input.JavaScript.Key (
+module JavaScript.Input.Key (
         Key(..),
         MouseButton(..),
         fromKey,
         fromMouseButton
 ) where
-
-import qualified FRP.Netwire.Input
-
 
 data Key = KeyA | KeyB | KeyC | KeyD | KeyE | KeyF | KeyG | KeyH | KeyI | KeyJ
          | KeyK | KeyL | KeyM | KeyN | KeyO | KeyP | KeyQ | KeyR | KeyS | KeyT
@@ -25,9 +22,6 @@ data Key = KeyA | KeyB | KeyC | KeyD | KeyE | KeyF | KeyG | KeyH | KeyI | KeyJ
          deriving (Eq, Show)
 
 data MouseButton = MouseLeft | MouseMiddle | MouseRight deriving (Eq, Show)
-
-instance FRP.Netwire.Input.Key Key
-instance FRP.Netwire.Input.MouseButton MouseButton
 
 fromKey :: Key -> [Int]
 fromKey KeyA = [65, 97]

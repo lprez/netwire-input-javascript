@@ -1,7 +1,6 @@
-{-# LANGUAGE OverloadedStrings, TypeSynonymInstances,
-             FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 
-module FRP.Netwire.Input.JavaScript (
+module JavaScript.Input (
         JSInputState,
         JSInputControl,
         JSInput,
@@ -11,25 +10,31 @@ module FRP.Netwire.Input.JavaScript (
         mkInputControl,
         initialInputState,
         pollJavaScript,
-        cursorLocked,
         lockCursor,
-        unlockCursor
+        unlockCursor,
+        setCursorModeM,
+        mbIsPressedM,
+        releaseButtonM,
+        cursorM,
+        lockedCursorM,
+        scrollM,
+        keyIsPressedM,
+        releaseKeyM
 ) where
 
 import qualified Data.IntSet as S
 import Control.Applicative
 import Control.Monad (when)
 import Control.Monad.Trans.State
-import Control.Wire.Core
 import Data.IORef
-import FRP.Netwire.Input hiding (Key, MouseButton)
-import FRP.Netwire.Input.JavaScript.Key
 
 import GHCJS.Foreign hiding (Object)
 import GHCJS.Foreign.Callback
 import GHCJS.Marshal
 import GHCJS.Types
 import JavaScript.Object.Internal
+
+import JavaScript.Input.Key
 
 data JSInputState = JSInputState {
         keyPressedSet :: S.IntSet,
@@ -41,7 +46,8 @@ data JSInputState = JSInputState {
         scrollAmount :: (Double, Double),
         hiddenCursor :: Bool,
         lockedCursor :: Bool,
-        newCursorMode :: Maybe CursorMode
+        reqHiddenCursor :: Maybe Bool,
+        reqLockedCursor :: Maybe Bool
 }
 
 data Event = KeyDown Int | KeyUp Int | MouseDown Int | MouseUp Int
@@ -100,7 +106,8 @@ initialInputState = JSInputState {
         scrollAmount = (0, 0),
         hiddenCursor = False,
         lockedCursor = False,
-        newCursorMode = Nothing
+        reqHiddenCursor = Nothing,
+        reqLockedCursor = Nothing
         }
 
 -- | Update the 'JSInputState' with the new events.
@@ -114,30 +121,24 @@ pollJavaScript is (JSInputControl eventsVar ptrLockVar element) =
                            is { scrollAmount = (0, 0)
                               , cursorMovement = (0, 0) }
                            events
-               hidden = hiddenCursor is
-               locked = lockedCursor is'
 
-           hidden' <- case newCursorMode is of
-                           Just cm -> changeCursorMode hidden locked cm
-                                                       element ptrLockVar
-                           _ -> return hidden
+           hidden <- case (hiddenCursor is, reqHiddenCursor is') of
+                          (True, Just False) -> showCursor element >>
+                                                return False
+                          (False, Just True) -> hideCursor element >>
+                                                return False
+                          _ -> return $ hiddenCursor is
 
-           return is' { hiddenCursor = hidden', newCursorMode = Nothing }
 
--- | In JavaScript, you can lock the pointer only after the user releases a
--- mouse button or a key. This means that 'cursorMode' (with 'CursorMode'Reset')
--- and 'mouseMickies' will not actually lock the pointer, but will schedule
--- the pointer lock request for the next interaction from the user.
--- In particular, 'mouseMickies' will behave like 'mouseCursor' if the pointer
--- is not locked.
---
--- This wire, which inhibits if the pointer is not locked, is
--- useful if you want to know if you're still waiting for the user to lock the
--- pointer, and if the user manually unlocked it.
-cursorLocked :: (Monoid e, Monad m) => Wire s e (JSInputT m) a a
-cursorLocked = mkGen_ $ \x -> boolToEither x . lockedCursor <$> get
-        where boolToEither _ False = Left mempty
-              boolToEither x True = Right x
+           case (lockedCursor is', reqLockedCursor is') of
+                (True, Just False) -> writeIORef ptrLockVar False >>
+                                      unlockCursorRaw
+                (False, Just True) -> writeIORef ptrLockVar True
+                _ -> return ()
+
+           return is' { hiddenCursor = hidden
+                      , reqHiddenCursor = Nothing
+                      , reqLockedCursor = Nothing }
 
 -- | Manually schedule cursor lock.
 lockCursor :: JSInputControl -> IO ()
@@ -148,18 +149,44 @@ unlockCursor :: JSInputControl -> IO ()
 unlockCursor (JSInputControl _ ptrLockVar _) = writeIORef ptrLockVar False
                                                >> unlockCursorRaw
 
-changeCursorMode :: Bool -> Bool -> CursorMode
-                 -> JSVal -> IORef Bool -> IO Bool
-changeCursorMode hidden locked cm element ptrLockVar = 
-        do case (locked, cm == CursorMode'Reset || cm == CursorMode'Disabled) of
-                (True, False) -> writeIORef ptrLockVar False >> unlockCursorRaw
-                (False, True) -> writeIORef ptrLockVar True
-                _ -> return ()
+setCursorModeM :: Monad m => (Maybe Bool, Maybe Bool) -> JSInputT m ()
+setCursorModeM (lock, hide) = modify $ \is -> is { reqLockedCursor = lock
+                                                 , reqHiddenCursor = hide }
 
-           case (hidden, cm == CursorMode'Hidden) of
-                (True, False) -> showCursor element >> return False
-                (False, True) -> hideCursor element >> return True
-                _ -> return hidden
+mbIsPressedM :: Monad m => MouseButton -> JSInputT m Bool
+mbIsPressedM mb = S.member (fromMouseButton mb) . mbPressedSet <$> get
+
+releaseButtonM :: Monad m => MouseButton -> JSInputT m ()
+releaseButtonM mb = modify $
+        \is -> is { mbReleasedSet = S.insert (fromMouseButton mb) $
+                                        mbReleasedSet is
+                  , mbPressedSet = S.delete (fromMouseButton mb) $
+                                        mbPressedSet is }
+
+cursorM :: Monad m => JSInputT m (Float, Float)
+cursorM = (<$> get) $ \is -> if lockedCursor is
+                             then cursorMovement is
+                             else cursorPos is
+
+lockedCursorM :: Monad m => JSInputT m Bool
+lockedCursorM = lockedCursor <$> get
+
+scrollM :: Monad m => JSInputT m (Double, Double)
+scrollM = scrollAmount <$> get
+
+keyIsPressedM :: Monad m => Key -> JSInputT m Bool
+keyIsPressedM k = do kp <- keyPressedSet <$> get
+                     return $ any (flip S.member kp) (fromKey k)
+
+releaseKeyM :: Monad m => Key -> JSInputT m ()
+releaseKeyM k = modify $
+        \is -> is { keyReleasedSet = foldr S.insert
+                                           (keyReleasedSet is)
+                                           (fromKey k)
+                  , keyPressedSet = foldr S.delete
+                                          (keyPressedSet is)
+                                          (fromKey k)
+                  }
 
 compEvent :: Event -> JSInputState -> JSInputState
 compEvent (KeyDown k) is | S.member k $ keyReleasedSet is = is
@@ -183,31 +210,6 @@ compEvent (Wheel (x, y)) is =
             (x0, y0) = scrollAmount is
         in is { scrollAmount = (x0 + dx, y0 + dy) }
 compEvent (PointerLockChange locked) is = is { lockedCursor = locked }
-
-instance Monad m => MonadMouse MouseButton (JSInputT m) where
-        setCursorMode cm = modify $ \is -> is { newCursorMode = Just cm }
-        mbIsPressed mb = S.member (fromMouseButton mb) . mbPressedSet <$> get
-        releaseButton mb = modify $
-                \is -> is { mbReleasedSet = S.insert (fromMouseButton mb) $
-                                                     mbReleasedSet is
-                          , mbPressedSet = S.delete (fromMouseButton mb) $
-                                                    mbPressedSet is }
-        cursor = (<$> get) $ \is -> if lockedCursor is
-                                    then cursorMovement is
-                                    else cursorPos is
-        scroll = scrollAmount <$> get
-
-instance Monad m => MonadKeyboard Key (JSInputT m) where
-        keyIsPressed k = do kp <- keyPressedSet <$> get
-                            return $ any (flip S.member kp) (fromKey k)
-        releaseKey k = modify $
-                \is -> is { keyReleasedSet = foldr S.insert
-                                                   (keyReleasedSet is)
-                                                   (fromKey k)
-                          , keyPressedSet = foldr S.delete
-                                                  (keyPressedSet is)
-                                                  (fromKey k)
-                          }
 
 eventKeyDown :: Object -> IO Event
 eventKeyDown ev = KeyDown <$> prop "keyCode" ev
